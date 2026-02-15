@@ -393,7 +393,9 @@ public:
             return;
         }
 
-        out << "DEPTH = 65536;\n";
+        auto depth = 819;
+
+        out << "DEPTH = " + std::to_string(depth) + ";\n";
         out << "WIDTH = 16;\n";
         out << "ADDRESS_RADIX = HEX;\n";
         out << "DATA_RADIX = HEX;\n";
@@ -401,12 +403,18 @@ public:
 
         for (size_t i = 0; i < machine_code.size(); ++i) {
             // Пишем только если не 0 или если нужно (можно оптимизировать размер файла)
-            out << std::hex << std::uppercase << i << " : "
-                << std::setw(4) << std::setfill('0') << machine_code[i] << ";\n";
+            out << std::dec << i            // индекс в десятичном
+                << " : "
+                << std::hex << std::uppercase
+                << std::setw(4) << std::setfill('0')
+                << machine_code[i]          // данные в HEX
+                << ";\n";
         }
 
-        if (machine_code.size() < 65536) {
-            out << "[" << std::hex << machine_code.size() << "..FFFF] : 0000;\n";
+        if (machine_code.size() < depth) {
+            out << "[" << std::dec << machine_code.size()
+                << ".." << depth - 1
+                << "] : 0000;\n";
         }
 
         out << "END;\n";
