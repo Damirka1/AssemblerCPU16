@@ -10,15 +10,15 @@
 
 enum Opcode {
     NOP = 0x00,
-    MOV = 0x01,  // MOV ds, src  (или JMP)
+    MOV = 0x01,  // MOV ds, src
     STR = 0x02,  // MOV [ds], src
-    JZ = 0x03,  // JZ src
+    JZ = 0x03,   // JZ src
     LDR = 0x04,  // MOV ds, [src]
     CMP = 0x05,  // CMP ds, src
     POP = 0x07,  // POP ds
-    IN = 0x0B,  // IN ds, src
+    IN = 0x0B,   // IN ds, src
     OUT = 0x0C,  // OUT ds, src
-    PUSH = 0x0F,  // PUSH src
+    PUSH = 0x0F, // PUSH src
     HLT = 0x10,
     WAIT = 0x11,
 
@@ -62,7 +62,7 @@ int parse_number(const std::string& s) {
     if (s.empty()) return 0;
     try {
         if (s.size() > 2 && s.substr(0, 2) == "0X")
-            return std::stoi(s.substr(2), nullptr, 16); // Убрать 0X перед парсингом иногда полезно
+            return std::stoi(s.substr(2), nullptr, 16);
         if (s.size() > 2 && s.substr(0, 2) == "0x")
             return std::stoi(s.substr(2), nullptr, 16);
         return std::stoi(s);
@@ -77,33 +77,46 @@ bool is_register(const std::string& s) {
     return REGISTERS.find(s) != REGISTERS.end();
 }
 
-// Структура строки кода
+// Тип строки: Инструкция, Данные или Смена адреса
+enum LineType { INSTRUCTION, RAW_DATA, ORG_DIRECTIVE };
+
 struct ParsedLine {
+    int line_num;
+    LineType type;      // Тип строки
     int address;        // Адрес в памяти (в словах)
-    std::string label;  // Если есть метка
-    std::string opcode; // Мнемоника
-    std::string arg1;   // Первый аргумент
-    std::string arg2;   // Второй аргумент
-    bool is_imm;        // Требует ли 2 слова (immediate value)
-    int imm_value;      // Значение константы
-    std::string imm_label; // Если константа - это метка
+
+    // Для инструкций
+    std::string label;
+    std::string opcode;
+    std::string arg1;
+    std::string arg2;
+    bool is_imm;
+    int imm_value;
+    std::string imm_label;
+
+    // Для данных (.WORD, .STRING)
+    std::vector<uint16_t> raw_data;
 };
 
 class Assembler {
 private:
     std::map<std::string, int> labels;
+    std::map<std::string, int> constants; // CONST NAME VALUE
     std::vector<ParsedLine> program;
     std::vector<uint16_t> machine_code;
     int current_addr = 0;
 
 public:
     // Проход 1: 
-    // Чтение, парсинг, подсчет адресов, поиск меток
+    // Парсинг, метки, директивы
     void pass1(std::istream& in) {
         std::string line_raw;
         current_addr = 0;
+        int line_count = 0;
 
         while (std::getline(in, line_raw)) {
+            line_count++;
+
             // Убираем комментарии
             std::string line = line_raw.substr(0, line_raw.find(';'));
             size_t comment_slash = line.find("//");
@@ -113,9 +126,15 @@ public:
             line = trim(line);
             if (line.empty()) continue;
 
-            ParsedLine pl;
-            pl.address = current_addr;
-            pl.is_imm = false;
+            // Обработка CONST (CONST NAME VALUE)
+            // Должно быть в начале строки
+            if (line.rfind("CONST", 0) == 0) {
+                std::stringstream ss(line);
+                std::string cmd, name, val_str;
+                ss >> cmd >> name >> val_str;
+                constants[to_upper(name)] = parse_number(val_str);
+                continue; // Это не код, в память не пишем
+            }
 
             // Ищем метку "label:"
             size_t colon = line.find(':');
@@ -126,38 +145,93 @@ public:
                 if (line.empty()) continue;
             }
 
+            ParsedLine pl;
+            pl.line_num = line_count;
+            pl.address = current_addr;
+            pl.type = INSTRUCTION; // По умолчанию
+            pl.is_imm = false;
+
             // Разбиваем на токены
+            // Сначала заменяем запятые на пробелы
             std::replace(line.begin(), line.end(), ',', ' ');
-
             std::stringstream ss(line);
-            ss >> pl.opcode;
-            pl.opcode = to_upper(pl.opcode);
 
+            std::string token;
+            ss >> token;
+            pl.opcode = to_upper(token);
+
+            // ОБРАБОТКА ДИРЕКТИВ
+            // .ORG 0x100 - смена адреса
+            if (pl.opcode == ".ORG") {
+                pl.type = ORG_DIRECTIVE;
+                std::string addr_str;
+                ss >> addr_str;
+                int new_addr = parse_number(addr_str);
+                current_addr = new_addr;
+                pl.address = new_addr; // Запоминаем новый адрес
+                program.push_back(pl);
+                continue;
+            }
+
+            // .WORD 1234, CONST_VAL, 0x55
+            else if (pl.opcode == ".WORD" || pl.opcode == "DW") {
+                pl.type = RAW_DATA;
+                std::string val_str;
+                while (ss >> val_str) {
+                    std::string up_val = to_upper(val_str);
+                    if (constants.count(up_val)) {
+                        pl.raw_data.push_back(constants[up_val]);
+                    }
+                    else {
+                        pl.raw_data.push_back(parse_number(val_str));
+                    }
+                    current_addr++; // 1 слово = 1 адрес
+                }
+                program.push_back(pl);
+                continue;
+            }
+
+            // .STRING "Hello World"
+            else if (pl.opcode == ".STRING") {
+                pl.type = RAW_DATA;
+                // Остаток строки (после .STRING) это контент
+                std::string content;
+                std::getline(ss, content);
+
+                size_t first_q = content.find('"');
+                size_t last_q = content.rfind('"');
+
+                if (first_q != std::string::npos && last_q != std::string::npos && last_q > first_q) {
+                    std::string text = content.substr(first_q + 1, last_q - first_q - 1);
+                    for (char c : text) {
+                        pl.raw_data.push_back((uint16_t)c);
+                        current_addr++;
+                    }
+                    pl.raw_data.push_back(0); // Null terminator
+                    current_addr++;
+                }
+                program.push_back(pl);
+                continue;
+            }
+
+            // ОБРАБОТКА ИНСТРУКЦИЙ
             std::string temp;
             if (ss >> temp) pl.arg1 = to_upper(temp);
             if (ss >> temp) pl.arg2 = to_upper(temp);
 
-            // Проверяем на пустоту перед вызовом front()
             bool arg1_is_bracket = (!pl.arg1.empty() && pl.arg1.front() == '[');
             bool arg2_is_bracket = (!pl.arg2.empty() && pl.arg2.front() == '[');
-
-            // Чистим строки (убираем скобки для анализа) только если скобки есть
-            std::string a1_clean = arg1_is_bracket ? pl.arg1.substr(1, pl.arg1.size() - 2) : pl.arg1;
-            std::string a2_clean = arg2_is_bracket ? pl.arg2.substr(1, pl.arg2.size() - 2) : pl.arg2;
 
             // Анализ типа адресации
             bool needs_imm = false;
             std::string imm_str = "";
 
-            // Случай 1: Второй аргумент - число/метка (MOV R1, 50)
-            // Добавлена проверка !pl.arg2.empty()
+            // Случай 1: Второй аргумент - число/метка/константа
             if (!pl.arg2.empty() && !is_register(pl.arg2) && !arg2_is_bracket) {
                 needs_imm = true;
                 imm_str = pl.arg2;
             }
-            // Случай 2: Первый аргумент - число/метка (JMP label, PUSH 50)
-            // JZ/JMP имеют только 1 аргумент, поэтому смотрим arg1
-            // PUSH тоже может принимать число (PUSH 5)
+            // Случай 2: Первый аргумент (для JMP/PUSH) - число/метка/константа
             else if ((pl.opcode == "JMP" || pl.opcode == "JZ" || pl.opcode == "CALL" || pl.opcode == "PUSH")
                 && !pl.arg1.empty() && !is_register(pl.arg1) && !arg1_is_bracket) {
                 needs_imm = true;
@@ -166,14 +240,17 @@ public:
 
             if (needs_imm) {
                 pl.is_imm = true;
-                // Проверка: это число или метка?
-                // Метки могут начинаться с буквы, числа с цифры или минуса
-                // 0x... тоже считается
-                if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
+
+                // Проверяем, может это CONST?
+                if (constants.count(to_upper(imm_str))) {
+                    pl.imm_value = constants[to_upper(imm_str)];
+                }
+                // Проверка: это число?
+                else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
                     pl.imm_value = parse_number(imm_str);
                 }
                 else {
-                    pl.imm_label = imm_str;
+                    pl.imm_label = imm_str; // Значит метка
                 }
                 current_addr += 2;
             }
@@ -186,9 +263,29 @@ public:
     }
 
     // Проход 2: 
-    // Генерация машинного кода
+    // Генерация карты памяти
     void pass2() {
+        // Используем map, чтобы поддерживать .ORG (дырки в памяти)
+        std::map<int, uint16_t> memory_map;
+
         for (const auto& cmd : program) {
+
+            // Если это смена адреса, ничего писать не надо, 
+            // следующий элемент сам запишется по нужному адресу
+            if (cmd.type == ORG_DIRECTIVE) {
+                continue;
+            }
+
+            // Если это сырые данные (.WORD, .STRING)
+            if (cmd.type == RAW_DATA) {
+                int ptr = cmd.address;
+                for (uint16_t val : cmd.raw_data) {
+                    memory_map[ptr++] = val;
+                }
+                continue;
+            }
+
+            // Если это инструкция
             uint16_t word = 0;
             int op_code = 0;
             int ds = 0;
@@ -215,18 +312,17 @@ public:
                 else { // MOV R1, R2 или MOV R1, 50
                     op_code = MOV;
                     ds = REGISTERS[cmd.arg1];
-                    // Если Immediate, src должен быть 0 (DATA)
                     src = cmd.is_imm ? 0 : REGISTERS[cmd.arg2];
                 }
             }
             else if (op == "JMP") {
-                op_code = MOV; // JMP это MOV IP, imm
+                op_code = MOV;
                 ds = REGISTERS["IP"];
                 src = 0; // Immediate
             }
             else if (op == "JZ") {
                 op_code = JZ;
-                ds = 0; // Не используется
+                ds = 0;
                 src = cmd.is_imm ? 0 : REGISTERS[cmd.arg1];
             }
             else if (op == "PUSH") {
@@ -237,17 +333,10 @@ public:
                 op_code = POP;
                 src = REGISTERS[cmd.arg1];
             }
-            else if (op == "IN") {
-                op_code = IN;
-                ds = REGISTERS[cmd.arg1];
-                src = REGISTERS[cmd.arg2];
-            }
-            else if (op == "OUT") {
-                op_code = OUT;
-                ds = REGISTERS[cmd.arg1];
-                src = REGISTERS[cmd.arg2];
-            }
+            else if (op == "IN") { op_code = IN; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
+            else if (op == "OUT") { op_code = OUT; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
             else if (op == "CMP") { op_code = CMP; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
+
             // ALU
             else if (op == "ADD") { op_code = ADD; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
             else if (op == "SUB") { op_code = SUB; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
@@ -259,33 +348,41 @@ public:
             else if (op == "INC") { op_code = INC; ds = REGISTERS[cmd.arg1]; src = 0; }
             else if (op == "DEC") { op_code = DEC; ds = REGISTERS[cmd.arg1]; src = 0; }
             else {
-                std::cerr << "Unknown opcode: " << op << std::endl;
+                std::cerr << "Line " << cmd.line_num << ": Unknown opcode " << op << std::endl;
                 exit(1);
             }
 
-            // Формирование слова инструкции: [src 4bit] [ds 4bit] [opcode 8bit]
+            // Запись инструкции в карту памяти
             word = (uint16_t)((src << 12) | (ds << 8) | (op_code & 0xFF));
-            machine_code.push_back(word);
+            memory_map[cmd.address] = word;
 
             // Если есть константа (Immediate)
             if (cmd.is_imm) {
                 uint16_t imm_val = 0;
                 if (!cmd.imm_label.empty()) {
-                    // Резолвинг метки
                     if (labels.find(cmd.imm_label) != labels.end()) {
-                        // Умножаем на 2, поскольку адресация по словам
-                        imm_val = labels[cmd.imm_label] * 2;
+                        imm_val = labels[cmd.imm_label] * 2; // Адресация
                     }
                     else {
-                        std::cerr << "Error: Undefined label " << cmd.imm_label << std::endl;
+                        std::cerr << "Line " << cmd.line_num << ": Undefined label " << cmd.imm_label << std::endl;
                         exit(1);
                     }
                 }
                 else {
                     imm_val = (uint16_t)cmd.imm_value;
                 }
-                machine_code.push_back(imm_val);
+                memory_map[cmd.address + 1] = imm_val;
             }
+        }
+
+        // Конвертация карты в линейный массив (vector)
+        if (memory_map.empty()) return;
+
+        int max_addr = memory_map.rbegin()->first;
+        machine_code.resize(max_addr + 1, 0); // Заполняем нулями
+
+        for (auto const& [addr, val] : memory_map) {
+            machine_code[addr] = val;
         }
     }
 
@@ -303,6 +400,7 @@ public:
         out << "CONTENT\nBEGIN\n";
 
         for (size_t i = 0; i < machine_code.size(); ++i) {
+            // Пишем только если не 0 или если нужно (можно оптимизировать размер файла)
             out << std::hex << std::uppercase << i << " : "
                 << std::setw(4) << std::setfill('0') << machine_code[i] << ";\n";
         }
