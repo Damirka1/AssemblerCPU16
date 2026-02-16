@@ -21,6 +21,10 @@ enum Opcode {
     PUSH = 0x0F, // PUSH src
     HLT = 0x10,
     WAIT = 0x11,
+    STR_OFF = 0x12, // MOV ds, [src + imm]
+    LDR_OFF = 0x14, // MOV [ds + imm], src
+    CALL = 0x15, // CALL
+    RET = 0x16, // RET
 
     // ALU (Bit 7 = 1)
     ADD = 0x80,
@@ -77,380 +81,276 @@ bool is_register(const std::string& s) {
     return REGISTERS.find(s) != REGISTERS.end();
 }
 
+// Перевод в hex4
+std::string hex4(uint16_t value) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(4) << value;
+    return ss.str();
+}
+
 // Тип строки: Инструкция, Данные или Смена адреса
-enum LineType { INSTRUCTION, RAW_DATA, ORG_DIRECTIVE };
+enum LineType { INSTRUCTION, RAW_DATA, RES_DATA, ORG_DIRECTIVE};
+enum SectionType { SEC_CODE, SEC_DATA, SEC_BSS };
 
 struct ParsedLine {
     int line_num;
+    std::string raw_text;
+    SectionType section;
     LineType type;      // Тип строки
-    int address;        // Адрес в памяти (в словах)
+    int address = 0;        // Адрес в словах (относительно начала своей секции в pass1, абсолютный в pass2)
 
     // Для инструкций
-    std::string label;
-    std::string opcode;
-    std::string arg1;
-    std::string arg2;
-    bool is_imm;
-    int imm_value;
-    std::string imm_label;
+    std::string label = "";
+    std::string opcode = "";
+    std::string arg1 = "";
+    std::string arg2 = "";
+    bool is_imm = false;
+    int imm_value = 0;
+    std::string imm_label = "";
 
     // Для данных (.WORD, .STRING)
     std::vector<uint16_t> raw_data;
+    int res_size = 0; // для .RESW
 };
 
 class Assembler {
 private:
-    std::map<std::string, int> labels;
-    std::map<std::string, int> constants; // CONST NAME VALUE
+    std::map<std::string, int> labels; // Имя -> Смещение в секции
+    std::map<std::string, SectionType> label_sections;
+    std::map<std::string, int> constants;
     std::vector<ParsedLine> program;
-    std::vector<uint16_t> machine_code;
-    int current_addr = 0;
+    std::map<int, uint16_t> memory_map;
+
+    int section_offsets[3] = { 0, 0, 0 }; // Для автоматического размещения
+    int section_bases[3] = { 0, 0, 0 };
 
 public:
     // Проход 1: 
     // Парсинг, метки, директивы
     void pass1(std::istream& in) {
         std::string line_raw;
-        current_addr = 0;
+        SectionType current_sec = SEC_CODE;
         int line_count = 0;
 
         while (std::getline(in, line_raw)) {
             line_count++;
-
-            // Убираем комментарии
             std::string line = line_raw.substr(0, line_raw.find(';'));
-            size_t comment_slash = line.find("//");
-            if (comment_slash != std::string::npos) {
-                line = line.substr(0, comment_slash);
-            }
             line = trim(line);
             if (line.empty()) continue;
 
-            // Обработка CONST (CONST NAME VALUE)
-            // Должно быть в начале строки
-            if (line.rfind("CONST", 0) == 0) {
+            if (to_upper(line).rfind("CONST", 0) == 0) {
                 std::stringstream ss(line);
-                std::string cmd, name, val_str;
-                ss >> cmd >> name >> val_str;
+                std::string cmd, name, val_str; ss >> cmd >> name >> val_str;
                 constants[to_upper(name)] = parse_number(val_str);
-                continue; // Это не код, в память не пишем
+                continue;
             }
 
-            // Ищем метку "label:"
+            std::string up_line = to_upper(line);
+            if (up_line == ".CODE" || up_line == ".TEXT") { current_sec = SEC_CODE; continue; }
+            if (up_line == ".DATA") { current_sec = SEC_DATA; continue; }
+            if (up_line == ".BSS") { current_sec = SEC_BSS;  continue; }
+
+            // .ORG
+            if (up_line.rfind(".ORG", 0) == 0) {
+                std::stringstream ss(line);
+                std::string cmd, val; ss >> cmd >> val;
+                section_offsets[current_sec] = parse_number(val);
+                continue;
+            }
+
+            // Метки labels
             size_t colon = line.find(':');
             if (colon != std::string::npos) {
-                std::string label_name = trim(line.substr(0, colon));
-                labels[to_upper(label_name)] = current_addr;
+                std::string label_name = to_upper(trim(line.substr(0, colon)));
+                labels[label_name] = section_offsets[current_sec];
+                label_sections[label_name] = current_sec;
                 line = trim(line.substr(colon + 1));
                 if (line.empty()) continue;
             }
 
             ParsedLine pl;
             pl.line_num = line_count;
-            pl.address = current_addr;
-            pl.type = INSTRUCTION; // По умолчанию
+            pl.raw_text = line_raw;
+            pl.section = current_sec;
+            pl.address = section_offsets[current_sec];
             pl.is_imm = false;
+            pl.res_size = 0;
 
-            // Разбиваем на токены
-            // Сначала заменяем запятые на пробелы
             std::replace(line.begin(), line.end(), ',', ' ');
             std::stringstream ss(line);
+            ss >> pl.opcode; pl.opcode = to_upper(pl.opcode);
 
-            std::string token;
-            ss >> token;
-            pl.opcode = to_upper(token);
-
-            // ОБРАБОТКА ДИРЕКТИВ
-            // .ORG 0x100 - смена адреса
-            if (pl.opcode == ".ORG") {
-                pl.type = ORG_DIRECTIVE;
-                std::string addr_str;
-                ss >> addr_str;
-                int new_addr = parse_number(addr_str);
-                current_addr = new_addr;
-                pl.address = new_addr; // Запоминаем новый адрес
-                program.push_back(pl);
-                continue;
-            }
-
-            // .WORD 1234, CONST_VAL, 0x55
-            else if (pl.opcode == ".WORD" || pl.opcode == "DW") {
+            if (pl.opcode == ".WORD" || pl.opcode == "DW") {
                 pl.type = RAW_DATA;
                 std::string val_str;
                 while (ss >> val_str) {
-                    std::string up_val = to_upper(val_str);
-                    if (constants.count(up_val)) {
-                        pl.raw_data.push_back(constants[up_val]);
-                    }
-                    else {
-                        pl.raw_data.push_back(parse_number(val_str));
-                    }
-                    current_addr++; // 1 слово = 1 адрес
+                    if (constants.count(to_upper(val_str))) pl.raw_data.push_back(constants[to_upper(val_str)]);
+                    else pl.raw_data.push_back(parse_number(val_str));
                 }
-                program.push_back(pl);
-                continue;
+                section_offsets[current_sec] += pl.raw_data.size();
             }
-
-            // .STRING "Hello World"
             else if (pl.opcode == ".STRING") {
                 pl.type = RAW_DATA;
-                // Остаток строки (после .STRING) это контент
-                std::string content;
-                std::getline(ss, content);
-
-                size_t first_q = content.find('"');
-                size_t last_q = content.rfind('"');
-
-                if (first_q != std::string::npos && last_q != std::string::npos && last_q > first_q) {
+                std::string content; std::getline(ss, content);
+                size_t first_q = content.find('"'), last_q = content.rfind('"');
+                if (first_q != std::string::npos && last_q > first_q) {
                     std::string text = content.substr(first_q + 1, last_q - first_q - 1);
-                    for (char c : text) {
-                        pl.raw_data.push_back((uint16_t)c);
-                        current_addr++;
-                    }
-                    pl.raw_data.push_back(0); // Null terminator
-                    current_addr++;
+                    for (char c : text) pl.raw_data.push_back((uint16_t)c);
+                    pl.raw_data.push_back(0);
                 }
-                program.push_back(pl);
-                continue;
+                section_offsets[current_sec] += pl.raw_data.size();
             }
-
-            // ОБРАБОТКА ИНСТРУКЦИЙ
-            std::string temp;
-            if (ss >> temp) pl.arg1 = to_upper(temp);
-            if (ss >> temp) pl.arg2 = to_upper(temp);
-
-            bool arg1_is_bracket = (!pl.arg1.empty() && pl.arg1.front() == '[');
-            bool arg2_is_bracket = (!pl.arg2.empty() && pl.arg2.front() == '[');
-
-            // Анализ типа адресации
-            bool needs_imm = false;
-            std::string imm_str = "";
-
-            // Случай 1: Второй аргумент - число/метка/константа
-            if (!pl.arg2.empty() && !is_register(pl.arg2) && !arg2_is_bracket) {
-                needs_imm = true;
-                imm_str = pl.arg2;
-            }
-            // Случай 2: Первый аргумент (для JMP/PUSH) - число/метка/константа
-            else if ((pl.opcode == "JMP" || pl.opcode == "JZ" || pl.opcode == "CALL" || pl.opcode == "PUSH")
-                && !pl.arg1.empty() && !is_register(pl.arg1) && !arg1_is_bracket) {
-                needs_imm = true;
-                imm_str = pl.arg1;
-            }
-
-            // Проверка на наличие '+' внутри скобок
-            bool has_offset_arg1 = (arg1_is_bracket && pl.arg1.find('+') != std::string::npos);
-            bool has_offset_arg2 = (arg2_is_bracket && pl.arg2.find('+') != std::string::npos);
-
-            // Если есть смещение -> это Immediate инструкция (занимает 2 слова)
-            if (has_offset_arg1 || has_offset_arg2) {
-                needs_imm = true;
-                // Парсим смещение, чтобы сохранить его в imm_value
-                std::string arg = has_offset_arg1 ? pl.arg1 : pl.arg2;
-                size_t plus = arg.find('+');
-                std::string val = arg.substr(plus + 1, arg.size() - plus - 2); // между + и ]
-                imm_str = trim(val);
-            }
-
-            if (needs_imm) {
-                pl.is_imm = true;
-
-                // Проверяем, может это CONST?
-                if (constants.count(to_upper(imm_str))) {
-                    pl.imm_value = constants[to_upper(imm_str)];
-                }
-                // Проверка: это число?
-                else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
-                    pl.imm_value = parse_number(imm_str);
-                }
-                else {
-                    pl.imm_label = imm_str; // Значит метка
-                }
-                current_addr += 2;
+            else if (pl.opcode == ".RESW") {
+                pl.type = RES_DATA;
+                std::string val; ss >> val;
+                pl.res_size = parse_number(val);
+                section_offsets[current_sec] += pl.res_size;
             }
             else {
-                current_addr += 1;
-            }
+                pl.type = INSTRUCTION;
+                if (ss >> pl.arg1) pl.arg1 = to_upper(pl.arg1);
+                if (ss >> pl.arg2) pl.arg2 = to_upper(pl.arg2);
 
+                bool arg1_br = (!pl.arg1.empty() && pl.arg1.front() == '[');
+                bool arg2_br = (!pl.arg2.empty() && pl.arg2.front() == '[');
+                bool has_off = (pl.arg1.find('+') != std::string::npos || pl.arg2.find('+') != std::string::npos);
+                bool is_imm_cmd = (pl.opcode == "JMP" || pl.opcode == "JZ" || pl.opcode == "CALL" || pl.opcode == "PUSH");
+                bool arg2_imm = (!pl.arg2.empty() && !is_register(pl.arg2) && !arg2_br);
+
+                if (has_off || arg2_imm || (is_imm_cmd && !pl.arg1.empty() && !is_register(pl.arg1) && !arg1_br)) {
+                    pl.is_imm = true;
+
+                    std::string imm_str = "";
+                    if (has_off) {
+                        std::string arg = (pl.arg1.find('+') != std::string::npos) ? pl.arg1 : pl.arg2;
+                        size_t plus = arg.find('+');
+                        imm_str = trim(arg.substr(plus + 1, arg.size() - plus - 2));
+                    }
+                    else if (is_imm_cmd) {
+                        imm_str = pl.arg1;
+                    }
+                    else {
+                        imm_str = pl.arg2;
+                    }
+
+                    if (constants.count(to_upper(imm_str))) {
+                        pl.imm_value = constants[to_upper(imm_str)];
+                    }
+                    else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
+                        pl.imm_value = parse_number(imm_str);
+                    }
+                    else {
+                        pl.imm_label = to_upper(imm_str); // Теперь метка сохранится!
+                    }
+
+                    section_offsets[current_sec] += 2;
+                }
+                else {
+                    section_offsets[current_sec] += 1;
+                }
+            }
             program.push_back(pl);
+        }
+
+        // Автоматическое распределение секций: CODE -> DATA -> BSS
+        section_bases[SEC_CODE] = 0;
+        section_bases[SEC_DATA] = section_offsets[SEC_CODE];
+        section_bases[SEC_BSS] = section_bases[SEC_DATA] + section_offsets[SEC_DATA];
+
+        // Финализация адресов меток
+        for (auto& [name, addr] : labels) {
+            addr += section_bases[label_sections[name]];
         }
     }
 
     // Проход 2: 
     // Генерация карты памяти
     void pass2() {
-        // Используем map, чтобы поддерживать .ORG (дырки в памяти)
-        std::map<int, uint16_t> memory_map;
+        std::cout << "\n--- ASSEMBLY LISTING ---\n";
+        std::cout << "ADDR  | CODE      | SOURCE\n";
+        std::cout << "----------------------------\n";
 
-        for (auto& cmd : program) {
-
-            // Если это смена адреса, ничего писать не надо, 
-            // следующий элемент сам запишется по нужному адресу
-            if (cmd.type == ORG_DIRECTIVE) {
-                continue;
-            }
-
-            // Если это сырые данные (.WORD, .STRING)
-            if (cmd.type == RAW_DATA) {
-                int ptr = cmd.address;
-                for (uint16_t val : cmd.raw_data) {
-                    memory_map[ptr++] = val;
+        for (auto& pl : program) {
+            // Применяем базу секции
+            int abs_addr = pl.address + section_bases[pl.section];
+            std::stringstream hex_code;
+            std::string label_info = "";
+            
+            if (pl.type == RAW_DATA) {
+                for (int i = 0; i < pl.raw_data.size(); ++i) {
+                    memory_map[abs_addr + i] = pl.raw_data[i];
+                    if (i < 2) hex_code << std::hex << std::setw(4) << std::setfill('0') << pl.raw_data[i] << " ";
                 }
-                continue;
             }
+            else if (pl.type == INSTRUCTION) {
+                int ds = 0, src = 0, op = NOP;
+                std::string o = pl.opcode;
 
-            // Если это инструкция
-            uint16_t word = 0;
-            int op_code = 0;
-            int ds = 0;
-            int src = 0;
-
-            std::string op = cmd.opcode;
-
-            // Логика выбора Opcode и операндов
-            if (op == "NOP") op_code = NOP;
-            else if (op == "HLT") op_code = HLT;
-            else if (op == "WAIT") op_code = WAIT;
-
-            else if (op == "MOV" || op == "LDR" || op == "STR") { // Объединяем, так как синтаксис похож
-                // Парсинг смещения: [REG + IMM]
-                auto parse_mem_operand = [&](std::string arg, int& reg_out, int& offset_out) -> bool {
-                    if (arg.front() != '[') return false;
-
-                    std::string content = arg.substr(1, arg.size() - 2); // Убираем []
-                    size_t plus_pos = content.find('+');
-
-                    if (plus_pos != std::string::npos) {
-                        std::string reg_str = trim(content.substr(0, plus_pos));
-                        std::string imm_str = trim(content.substr(plus_pos + 1));
-                        reg_out = REGISTERS[to_upper(reg_str)];
-                        offset_out = parse_number(imm_str);
+                auto parse_mem = [&](std::string arg, int& r, int& off) {
+                    if (arg.empty() || arg.front() != '[') return false;
+                    std::string c = arg.substr(1, arg.size() - 2);
+                    size_t p = c.find('+');
+                    if (p != std::string::npos) {
+                        r = REGISTERS[trim(c.substr(0, p))];
+                        off = parse_number(trim(c.substr(p + 1)));
                         return true;
                     }
-                    else {
-                        // Просто [REG]
-                        reg_out = REGISTERS[to_upper(content)];
-                        offset_out = 0;
-                        return false; // Нет смещения (старый формат)
-                    }
+                    r = REGISTERS[trim(c)]; off = 0; return false;
                     };
 
-                int mem_reg = 0;
-                int offset = 0;
+                int rb, ro;
+                if (o == "MOV" || o == "LDR" || o == "STR") {
+                    if (parse_mem(pl.arg1, rb, ro)) { op = STR_OFF; ds = rb; src = REGISTERS[pl.arg2]; pl.imm_value = ro; }
+                    else if (parse_mem(pl.arg2, rb, ro)) { op = LDR_OFF; ds = REGISTERS[pl.arg1]; src = rb; pl.imm_value = ro; }
+                    else if (pl.arg1.find('[') != std::string::npos) { op = STR; ds = REGISTERS[pl.arg1.substr(1, pl.arg1.size() - 2)]; src = REGISTERS[pl.arg2]; }
+                    else if (pl.arg2.find('[') != std::string::npos) { op = LDR; ds = REGISTERS[pl.arg1]; src = REGISTERS[pl.arg2.substr(1, pl.arg2.size() - 2)]; }
+                    else { op = MOV; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                }
+                else if (o == "ADD") { op = ADD; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "SUB") { op = SUB; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "CMP") { op = CMP; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "JZ") { op = JZ;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JMP") { op = MOV; ds = REGISTERS["IP"]; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "CALL") { op = CALL; }
+                else if (o == "RET") { op = RET; }
+                else if (o == "PUSH") { op = PUSH; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "POP") { op = POP; ds = REGISTERS[pl.arg1]; }
+                else if (o == "INC") { op = INC; ds = REGISTERS[pl.arg1]; }
+                else if (o == "DEC") { op = DEC; ds = REGISTERS[pl.arg1]; }
+                else if (o == "HLT") { op = HLT; }
 
-                // STR [ds + imm], src
-                if (parse_mem_operand(cmd.arg1, mem_reg, offset)) {
-                    op_code = 0x12; // STR_OFF
-                    ds = mem_reg;
-                    src = REGISTERS[cmd.arg2];
-                    cmd.is_imm = true;      // Это хак, чтобы записать смещение
-                    cmd.imm_value = offset; // Записываем смещение в следующее слово
-                }
-                // STR [ds], src (Старый формат)
-                else if (cmd.arg1.front() == '[') {
-                    op_code = STR; // 0x02
-                    ds = REGISTERS[cmd.arg1.substr(1, cmd.arg1.size() - 2)];
-                    src = REGISTERS[cmd.arg2];
-                }
-                // LDR ds, [src + imm]
-                else if (parse_mem_operand(cmd.arg2, mem_reg, offset)) {
-                    op_code = 0x14; // LDR_OFF
-                    ds = REGISTERS[cmd.arg1];
-                    src = mem_reg;
-                    cmd.is_imm = true;
-                    cmd.imm_value = offset;
-                }
-                // LDR ds, [src] (Старый формат)
-                else if (cmd.arg2.front() == '[') {
-                    op_code = LDR; // 0x04
-                    ds = REGISTERS[cmd.arg1];
-                    src = REGISTERS[cmd.arg2.substr(1, cmd.arg2.size() - 2)];
-                }
-                // MOV R1, R2 или MOV R1, 50
-                else {
-                    op_code = MOV;
-                    ds = REGISTERS[cmd.arg1];
-                    src = cmd.is_imm ? 0 : REGISTERS[cmd.arg2];
-                }
-            }
-            else if (op == "JMP") {
-                op_code = MOV;
-                ds = REGISTERS["IP"];
-                src = 0; // Immediate
-            }
-            else if (op == "JZ") {
-                op_code = JZ;
-                ds = 0;
-                src = cmd.is_imm ? 0 : REGISTERS[cmd.arg1];
-            }
-            else if (op == "PUSH") {
-                op_code = PUSH;
-                src = cmd.is_imm ? 0 : REGISTERS[cmd.arg1];
-            }
-            else if (op == "POP") {
-                op_code = POP;
-                src = REGISTERS[cmd.arg1];
-            }
-            else if (op == "IN") { op_code = IN; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "OUT") { op_code = OUT; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "CMP") { op_code = CMP; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
+                uint16_t word = (src << 12) | (ds << 8) | (op & 0xFF);
+                memory_map[abs_addr] = word;
+                hex_code << std::hex << std::setw(4) << std::setfill('0') << word << " ";
 
-            // ALU
-            else if (op == "ADD") { op_code = ADD; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "SUB") { op_code = SUB; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "AND") { op_code = AND; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "OR") { op_code = OR;  ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "XOR") { op_code = XOR; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "LSL") { op_code = LSL; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "LSR") { op_code = LSR; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
-            else if (op == "INC") { op_code = INC; ds = REGISTERS[cmd.arg1]; src = 0; }
-            else if (op == "DEC") { op_code = DEC; ds = REGISTERS[cmd.arg1]; src = 0; }
-            else if (op == "CALL") {
-                op_code = 0x15; // CALL
-                ds = 0; // Не используется
-                src = 0; // Immediate (всегда константа или метка)
-                // cmd.is_imm уже true из pass1
-            }
-            else if (op == "RET") {
-                op_code = 0x16; // RET
-                ds = 0; src = 0;
-            }
-            else {
-                std::cerr << "Line " << cmd.line_num << ": Unknown opcode " << op << std::endl;
-                exit(1);
-            }
+                if (pl.is_imm) {
+                    uint16_t imm = 0;
+                    if (!pl.imm_label.empty()) {
+                        imm = (uint16_t)(labels[pl.imm_label] * 2);
 
-            // Запись инструкции в карту памяти
-            word = (uint16_t)((src << 12) | (ds << 8) | (op_code & 0xFF));
-            memory_map[cmd.address] = word;
-
-            // Если есть константа (Immediate)
-            if (cmd.is_imm) {
-                uint16_t imm_val = 0;
-                if (!cmd.imm_label.empty()) {
-                    if (labels.find(cmd.imm_label) != labels.end()) {
-                        imm_val = labels[cmd.imm_label] * 2; // Адресация
+                        label_info = " [@" + hex4(imm) + "]";
                     }
                     else {
-                        std::cerr << "Line " << cmd.line_num << ": Undefined label " << cmd.imm_label << std::endl;
-                        exit(1);
+                        // Если это был MOV R1, 0xFFFF (arg2 - это Imm)
+                        if (pl.imm_value == 0 && !pl.arg2.empty() && !is_register(pl.arg2) && pl.arg2.find('[') == std::string::npos)
+                            pl.imm_value = parse_number(pl.arg2);
+                        // Если это был PUSH 5 (arg1 - это Imm)
+                        else if (pl.imm_value == 0 && o == "PUSH" && !is_register(pl.arg1))
+                            pl.imm_value = parse_number(pl.arg1);
+                        // Если это JMP/JZ/CALL (arg1 - это Imm)
+                        else if (pl.imm_value == 0 && (o == "JZ" || o == "CALL" || (o == "MOV" && ds == 10)))
+                            pl.imm_value = parse_number(pl.arg1);
+
+                        imm = (uint16_t)pl.imm_value;
                     }
+                    memory_map[abs_addr + 1] = imm;
+                    hex_code << std::hex << std::setw(4) << std::setfill('0') << imm;
                 }
-                else {
-                    imm_val = (uint16_t)cmd.imm_value;
-                }
-                memory_map[cmd.address + 1] = imm_val;
             }
-        }
 
-        // Конвертация карты в линейный массив (vector)
-        if (memory_map.empty()) return;
-
-        int max_addr = memory_map.rbegin()->first;
-        machine_code.resize(max_addr + 1, 0); // Заполняем нулями
-
-        for (auto const& [addr, val] : memory_map) {
-            machine_code[addr] = val;
+            // Запись в листинг
+            std::cout << std::right << std::hex << std::setfill('0') << std::setw(4) << (abs_addr * 2) << " | "
+                << std::left << std::setfill(' ') << std::setw(10) << hex_code.str() << " | " << pl.raw_text << label_info << "\n";
         }
     }
 
@@ -469,18 +369,18 @@ public:
         out << "DATA_RADIX = HEX;\n";
         out << "CONTENT\nBEGIN\n";
 
-        for (size_t i = 0; i < machine_code.size(); ++i) {
+        for (size_t i = 0; i < memory_map.size(); ++i) {
             // Пишем только если не 0 или если нужно (можно оптимизировать размер файла)
             out << std::dec << i            // индекс в десятичном
                 << " : "
                 << std::hex << std::uppercase
                 << std::setw(4) << std::setfill('0')
-                << machine_code[i]          // данные в HEX
+                << memory_map[i]          // данные в HEX
                 << ";\n";
         }
 
-        if (machine_code.size() < depth) {
-            out << "[" << std::dec << machine_code.size()
+        if (memory_map.size() < depth) {
+            out << "[" << std::dec << memory_map.size()
                 << ".." << depth - 1
                 << "] : 0000;\n";
         }
