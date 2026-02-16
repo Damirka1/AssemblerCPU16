@@ -238,6 +238,20 @@ public:
                 imm_str = pl.arg1;
             }
 
+            // Проверка на наличие '+' внутри скобок
+            bool has_offset_arg1 = (arg1_is_bracket && pl.arg1.find('+') != std::string::npos);
+            bool has_offset_arg2 = (arg2_is_bracket && pl.arg2.find('+') != std::string::npos);
+
+            // Если есть смещение -> это Immediate инструкция (занимает 2 слова)
+            if (has_offset_arg1 || has_offset_arg2) {
+                needs_imm = true;
+                // Парсим смещение, чтобы сохранить его в imm_value
+                std::string arg = has_offset_arg1 ? pl.arg1 : pl.arg2;
+                size_t plus = arg.find('+');
+                std::string val = arg.substr(plus + 1, arg.size() - plus - 2); // между + и ]
+                imm_str = trim(val);
+            }
+
             if (needs_imm) {
                 pl.is_imm = true;
 
@@ -268,7 +282,7 @@ public:
         // Используем map, чтобы поддерживать .ORG (дырки в памяти)
         std::map<int, uint16_t> memory_map;
 
-        for (const auto& cmd : program) {
+        for (auto& cmd : program) {
 
             // Если это смена адреса, ничего писать не надо, 
             // следующий элемент сам запишется по нужному адресу
@@ -298,18 +312,62 @@ public:
             else if (op == "HLT") op_code = HLT;
             else if (op == "WAIT") op_code = WAIT;
 
-            else if (op == "MOV") {
-                if (cmd.arg1.front() == '[') { // MOV [R1], R2
-                    op_code = STR;
+            else if (op == "MOV" || op == "LDR" || op == "STR") { // Объединяем, так как синтаксис похож
+                // Парсинг смещения: [REG + IMM]
+                auto parse_mem_operand = [&](std::string arg, int& reg_out, int& offset_out) -> bool {
+                    if (arg.front() != '[') return false;
+
+                    std::string content = arg.substr(1, arg.size() - 2); // Убираем []
+                    size_t plus_pos = content.find('+');
+
+                    if (plus_pos != std::string::npos) {
+                        std::string reg_str = trim(content.substr(0, plus_pos));
+                        std::string imm_str = trim(content.substr(plus_pos + 1));
+                        reg_out = REGISTERS[to_upper(reg_str)];
+                        offset_out = parse_number(imm_str);
+                        return true;
+                    }
+                    else {
+                        // Просто [REG]
+                        reg_out = REGISTERS[to_upper(content)];
+                        offset_out = 0;
+                        return false; // Нет смещения (старый формат)
+                    }
+                    };
+
+                int mem_reg = 0;
+                int offset = 0;
+
+                // STR [ds + imm], src
+                if (parse_mem_operand(cmd.arg1, mem_reg, offset)) {
+                    op_code = 0x12; // STR_OFF
+                    ds = mem_reg;
+                    src = REGISTERS[cmd.arg2];
+                    cmd.is_imm = true;      // Это хак, чтобы записать смещение
+                    cmd.imm_value = offset; // Записываем смещение в следующее слово
+                }
+                // STR [ds], src (Старый формат)
+                else if (cmd.arg1.front() == '[') {
+                    op_code = STR; // 0x02
                     ds = REGISTERS[cmd.arg1.substr(1, cmd.arg1.size() - 2)];
                     src = REGISTERS[cmd.arg2];
                 }
-                else if (cmd.arg2.front() == '[') { // MOV R1, [R2]
-                    op_code = LDR;
+                // LDR ds, [src + imm]
+                else if (parse_mem_operand(cmd.arg2, mem_reg, offset)) {
+                    op_code = 0x14; // LDR_OFF
+                    ds = REGISTERS[cmd.arg1];
+                    src = mem_reg;
+                    cmd.is_imm = true;
+                    cmd.imm_value = offset;
+                }
+                // LDR ds, [src] (Старый формат)
+                else if (cmd.arg2.front() == '[') {
+                    op_code = LDR; // 0x04
                     ds = REGISTERS[cmd.arg1];
                     src = REGISTERS[cmd.arg2.substr(1, cmd.arg2.size() - 2)];
                 }
-                else { // MOV R1, R2 или MOV R1, 50
+                // MOV R1, R2 или MOV R1, 50
+                else {
                     op_code = MOV;
                     ds = REGISTERS[cmd.arg1];
                     src = cmd.is_imm ? 0 : REGISTERS[cmd.arg2];
@@ -347,6 +405,16 @@ public:
             else if (op == "LSR") { op_code = LSR; ds = REGISTERS[cmd.arg1]; src = REGISTERS[cmd.arg2]; }
             else if (op == "INC") { op_code = INC; ds = REGISTERS[cmd.arg1]; src = 0; }
             else if (op == "DEC") { op_code = DEC; ds = REGISTERS[cmd.arg1]; src = 0; }
+            else if (op == "CALL") {
+                op_code = 0x15; // CALL
+                ds = 0; // Не используется
+                src = 0; // Immediate (всегда константа или метка)
+                // cmd.is_imm уже true из pass1
+            }
+            else if (op == "RET") {
+                op_code = 0x16; // RET
+                ds = 0; src = 0;
+            }
             else {
                 std::cerr << "Line " << cmd.line_num << ": Unknown opcode " << op << std::endl;
                 exit(1);
