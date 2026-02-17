@@ -18,6 +18,9 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="tinyc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="test.asm">
@@ -27,6 +30,9 @@
       <Filter>Source Files</Filter>
     </None>
     <None Include="test3.asm">
+      <Filter>Source Files</Filter>
+    </None>
+    <None Include="test4.asm">
       <Filter>Source Files</Filter>
     </None>
   </ItemGroup>
