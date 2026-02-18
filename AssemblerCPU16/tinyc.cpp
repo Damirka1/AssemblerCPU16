@@ -356,48 +356,48 @@ public:
     }
 };
 
-int main(int argc, char** argv) {
-    // Обновленный код на C
-    // Читаем количество чисел, затем сами числа, суммируем их и выводим.
-    std::string c_code = R"(
-        int sum;
-        
-        int main() {
-            int count;
-            int val;
-            
-            sum = 0;
-            
-            count = input();
-            
-            while (count) {
-                val = input();
-                sum = sum + val;
-                print(sum);  
-                count = count - 1;
-            }
-            
-            return sum;
-        }
-    )";
-
-    try {
-        Compiler compiler(c_code);
-        compiler.parseProgram();
-        std::string asm_code = compiler.getAssembly();
-
-        std::cout << "--- C CODE ---\n" << c_code << "\n";
-        std::cout << "\n--- GENERATED ASSEMBLY ---\n" << asm_code << "\n";
-
-        std::ofstream out("output.asm");
-        out << asm_code;
-        out.close();
-        std::cout << "Saved to output.asm\n";
-
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Compile Error: " << e.what() << std::endl;
-        return 1;
-    }
-    return 0;
-}
+//int main(int argc, char** argv) {
+//    // Обновленный код на C
+//    // Читаем количество чисел, затем сами числа, суммируем их и выводим.
+//    std::string c_code = R"(
+//        int sum;
+//        
+//        int main() {
+//            int count;
+//            int val;
+//            
+//            sum = 0;
+//            
+//            count = input();
+//            
+//            while (count) {
+//                val = input();
+//                sum = sum + val;
+//                print(sum);  
+//                count = count - 1;
+//            }
+//            
+//            return sum;
+//        }
+//    )";
+//
+//    try {
+//        Compiler compiler(c_code);
+//        compiler.parseProgram();
+//        std::string asm_code = compiler.getAssembly();
+//
+//        std::cout << "--- C CODE ---\n" << c_code << "\n";
+//        std::cout << "\n--- GENERATED ASSEMBLY ---\n" << asm_code << "\n";
+//
+//        std::ofstream out("output.asm");
+//        out << asm_code;
+//        out.close();
+//        std::cout << "Saved to output.asm\n";
+//
+//    }
+//    catch (const std::exception& e) {
+//        std::cerr << "Compile Error: " << e.what() << std::endl;
+//        return 1;
+//    }
+//    return 0;
+//}

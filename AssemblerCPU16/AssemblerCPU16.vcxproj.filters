@@ -35,5 +35,8 @@
     <None Include="test4.asm">
       <Filter>Source Files</Filter>
     </None>
+    <None Include="test5.asm">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

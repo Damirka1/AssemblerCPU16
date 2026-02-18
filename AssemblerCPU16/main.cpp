@@ -10,21 +10,30 @@
 
 enum Opcode {
     NOP = 0x00,
-    MOV = 0x01,  // MOV ds, src
+    MOV = 0x01,  // MOV ds, src / JMP src
     STR = 0x02,  // MOV [ds], src
-    JZ = 0x03,   // JZ src
+    JZ = 0x03,  // JZ src
     LDR = 0x04,  // MOV ds, [src]
     CMP = 0x05,  // CMP ds, src
+    JNZ = 0x06,  // JNZ src
     POP = 0x07,  // POP ds
-    IN = 0x0B,   // IN ds, src
+    JC = 0x08,  // JC src
+    JNC = 0x09,  // JNC src
+    JS = 0x0A,  // JS src
+    IN = 0x0B,  // IN ds, src
     OUT = 0x0C,  // OUT ds, src
+    JNS = 0x0D,  // JNS src
     PUSH = 0x0F, // PUSH src
     HLT = 0x10,
     WAIT = 0x11,
-    STR_OFF = 0x12, // MOV ds, [src + imm]
-    LDR_OFF = 0x14, // MOV [ds + imm], src
-    CALL = 0x15, // CALL
-    RET = 0x16, // RET
+    STR_OFF = 0x12, // MOV [ds + imm], src
+    LDR_OFF = 0x14, // MOV ds, [src + imm]
+    CALL = 0x15,
+    RET = 0x16,
+    JO = 0x18, // Jump if Overflow
+    JNO = 0x19, // Jump if Not Overflow
+    JL = 0x1A, // Jump if Less (Signed)
+    JGE = 0x1B, // Jump if Greater Equal (Signed)
 
     // ALU (Bit 7 = 1)
     ADD = 0x80,
@@ -37,14 +46,16 @@ enum Opcode {
     INC = 0x87,
     MUL = 0x88,
     DIV = 0x89,
-    DEC = 0x8F
+    DEC = 0x8F,
+    ADC = 0x90, // Add with Carry
+    SBB = 0x91  // Subtract with Borrow
 };
 
 // Индексы регистров
 std::map<std::string, int> REGISTERS = {
     {"DATA", 0}, {"R0", 1}, {"R1", 2}, {"R2", 3}, {"R3", 4},
     {"R4", 5},   {"R5", 6}, {"R6", 7}, {"R7", 8}, {"R8", 9},
-    {"IP", 10},  {"SP", 11}, {"RP", 12}
+    {"IP", 10},  {"SP", 11}, {"RP", 12}, {"BP", 13}
 };
 
 // Убираем пробелы по краям
@@ -65,15 +76,11 @@ std::string to_upper(std::string s) {
 int parse_number(const std::string& s) {
     if (s.empty()) return 0;
     try {
-        if (s.size() > 2 && s.substr(0, 2) == "0X")
-            return std::stoi(s.substr(2), nullptr, 16);
-        if (s.size() > 2 && s.substr(0, 2) == "0x")
+        if (s.size() > 2 && to_upper(s.substr(0, 2)) == "0X")
             return std::stoi(s.substr(2), nullptr, 16);
         return std::stoi(s);
     }
-    catch (...) {
-        return 0;
-    }
+    catch (...) { return 0; }
 }
 
 // Проверка, является ли строка регистром
@@ -211,10 +218,14 @@ public:
                 if (ss >> pl.arg1) pl.arg1 = to_upper(pl.arg1);
                 if (ss >> pl.arg2) pl.arg2 = to_upper(pl.arg2);
 
+                static const std::vector<std::string> imm_cmds = {
+                    "JMP", "JZ", "JNZ", "JC", "JNC", "JS", "JNS", "JO", "JNO", "JL", "JGE", "CALL", "PUSH"
+                };
+
                 bool arg1_br = (!pl.arg1.empty() && pl.arg1.front() == '[');
                 bool arg2_br = (!pl.arg2.empty() && pl.arg2.front() == '[');
                 bool has_off = (pl.arg1.find('+') != std::string::npos || pl.arg2.find('+') != std::string::npos);
-                bool is_imm_cmd = (pl.opcode == "JMP" || pl.opcode == "JZ" || pl.opcode == "CALL" || pl.opcode == "PUSH");
+                bool is_imm_cmd = std::find(imm_cmds.begin(), imm_cmds.end(), pl.opcode) != imm_cmds.end();
                 bool arg2_imm = (!pl.arg2.empty() && !is_register(pl.arg2) && !arg2_br);
 
                 if (has_off || arg2_imm || (is_imm_cmd && !pl.arg1.empty() && !is_register(pl.arg1) && !arg1_br)) {
@@ -233,15 +244,35 @@ public:
                         imm_str = pl.arg2;
                     }
 
-                    if (constants.count(to_upper(imm_str))) {
-                        pl.imm_value = constants[to_upper(imm_str)];
-                    }
-                    else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
+                    std::string upper_imm = to_upper(imm_str);
+
+                    if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && upper_imm.substr(0, 2) == "0X")) {
                         pl.imm_value = parse_number(imm_str);
+                        pl.imm_label = ""; // Это число, имени нет
                     }
                     else {
-                        pl.imm_label = to_upper(imm_str); // Теперь метка сохранится!
+                        // Это имя (либо константа, либо метка)
+                        pl.imm_label = upper_imm;
+
+                        // Если это константа, мы уже знаем её значение
+                        if (constants.count(upper_imm)) {
+                            pl.imm_value = constants[upper_imm];
+                        }
                     }
+
+                    //if (constants.count(to_upper(imm_str))) {
+                    //    pl.imm_value = constants[to_upper(imm_str)];
+                    //}
+                    //else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
+                    //    pl.imm_value = parse_number(imm_str);
+                    //    pl.imm_label = "";
+                    //}
+                    //else {
+                    //    pl.imm_label = to_upper(imm_str); // Теперь метка сохранится!
+                    //    if (constants.count(upper_imm)) {
+                    //        pl.imm_value = constants[upper_imm];
+                    //    }
+                    //}
 
                     section_offsets[current_sec] += 2;
                 }
@@ -308,9 +339,25 @@ public:
                 }
                 else if (o == "ADD") { op = ADD; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
                 else if (o == "SUB") { op = SUB; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "ADC") { op = ADC; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "SBB") { op = SBB; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
                 else if (o == "CMP") { op = CMP; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
-                else if (o == "JZ") { op = JZ;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "AND") { op = AND; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "OR") { op = OR;  ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "XOR") { op = XOR; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                
                 else if (o == "JMP") { op = MOV; ds = REGISTERS["IP"]; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JZ") { op = JZ;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JNZ") { op = JNZ; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JC") { op = JC;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JNC") { op = JNC; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JS") { op = JS;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JNS") { op = JNS; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JO") { op = JO;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JNO") { op = JNO; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JL") { op = JL;  src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                else if (o == "JGE") { op = JGE; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
+                
                 else if (o == "CALL") { op = CALL; }
                 else if (o == "RET") { op = RET; }
                 else if (o == "PUSH") { op = PUSH; src = pl.is_imm ? 0 : REGISTERS[pl.arg1]; }
@@ -326,21 +373,22 @@ public:
                 if (pl.is_imm) {
                     uint16_t imm = 0;
                     if (!pl.imm_label.empty()) {
-                        imm = (uint16_t)(labels[pl.imm_label] * 2);
-
-                        label_info = " [@" + hex4(imm) + "]";
+                        // Проверяем, не метка ли это (адрес перехода)
+                        if (labels.count(pl.imm_label)) {
+                            imm = (uint16_t)(labels[pl.imm_label] * 2);
+                            label_info = " [@" + hex4(imm) + "]";
+                        }
+                        // Проверяем, не константа ли это (значение CONST)
+                        else if (constants.count(pl.imm_label)) {
+                            imm = (uint16_t)constants[pl.imm_label];
+                            label_info = " [#" + std::to_string(imm) + "]"; // Префикс # для констант
+                        }
+                        else {
+                            label_info = " [!UNDEF!]";
+                        }
                     }
                     else {
-                        // Если это был MOV R1, 0xFFFF (arg2 - это Imm)
-                        if (pl.imm_value == 0 && !pl.arg2.empty() && !is_register(pl.arg2) && pl.arg2.find('[') == std::string::npos)
-                            pl.imm_value = parse_number(pl.arg2);
-                        // Если это был PUSH 5 (arg1 - это Imm)
-                        else if (pl.imm_value == 0 && o == "PUSH" && !is_register(pl.arg1))
-                            pl.imm_value = parse_number(pl.arg1);
-                        // Если это JMP/JZ/CALL (arg1 - это Imm)
-                        else if (pl.imm_value == 0 && (o == "JZ" || o == "CALL" || (o == "MOV" && ds == 10)))
-                            pl.imm_value = parse_number(pl.arg1);
-
+                        // Это просто число в коде (например, MOV R0, 5)
                         imm = (uint16_t)pl.imm_value;
                     }
                     memory_map[abs_addr + 1] = imm;
