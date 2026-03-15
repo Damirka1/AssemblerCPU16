@@ -15,25 +15,8 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
+    <ClCompile Include="tinyc.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="test.asm">
-      <Filter>Source Files</Filter>
-    </None>
-    <None Include="test2.asm">
-      <Filter>Source Files</Filter>
-    </None>
-    <None Include="test3.asm">
-      <Filter>Source Files</Filter>
-    </None>
-    <None Include="test4.asm">
-      <Filter>Source Files</Filter>
-    </None>
-    <None Include="test5.asm">
-      <Filter>Source Files</Filter>
-    </None>
   </ItemGroup>
 </Project>

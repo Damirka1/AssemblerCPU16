@@ -37,22 +37,37 @@ class Lexer {
     std::string src;
     size_t pos = 0;
     int line = 1;
+
+    bool is_alpha(char c) { return isalpha(static_cast<unsigned char>(c)); }
+    bool is_alnum(char c) { return isalnum(static_cast<unsigned char>(c)); }
+    bool is_digit(char c) { return isdigit(static_cast<unsigned char>(c)); }
+    bool is_space(char c) { return isspace(static_cast<unsigned char>(c)); }
+
 public:
     Lexer(std::string s) : src(s) {}
+
     Token next() {
         while (pos < src.size()) {
-            if (isspace(src[pos])) { if (src[pos] == '\n') line++; pos++; continue; }
-            if (src[pos] == '/' && src[pos + 1] == '/') {
+            unsigned char c = static_cast<unsigned char>(src[pos]);
+            if (is_space(c)) {
+                if (c == '\n') line++;
+                pos++;
+                continue;
+            }
+            if (pos + 1 < src.size() && src[pos] == '/' && src[pos + 1] == '/') {
                 while (pos < src.size() && src[pos] != '\n') pos++;
                 continue;
             }
+            // Пропуск UTF-8 BOM и странных символов
+            if (c > 127 && !is_alpha(c)) { pos++; continue; }
             break;
         }
+
         if (pos >= src.size()) return { TOK_EOF, "", line };
 
-        if (isalpha(src[pos])) {
+        if (is_alpha(src[pos]) || src[pos] == '_') {
             std::string id;
-            while (pos < src.size() && (isalnum(src[pos]) || src[pos] == '_')) id += src[pos++];
+            while (pos < src.size() && (is_alnum(src[pos]) || src[pos] == '_')) id += src[pos++];
             if (id == "int") return { TOK_INT, id, line };
             if (id == "char") return { TOK_CHAR, id, line };
             if (id == "void") return { TOK_VOID, id, line };
@@ -64,25 +79,35 @@ public:
             if (id == "__asm") return { TOK_ASM, id, line };
             return { TOK_ID, id, line };
         }
-        if (isdigit(src[pos])) {
+
+        if (is_digit(src[pos])) {
             std::string num;
-            while (pos < src.size() && isdigit(src[pos])) num += src[pos++];
+            while (pos < src.size() && is_digit(src[pos])) num += src[pos++];
             return { TOK_NUM, num, line };
         }
+
         if (src[pos] == '"') {
             std::string s; pos++;
             while (pos < src.size() && src[pos] != '"') s += src[pos++];
-            pos++; return { TOK_STR, s, line };
+            if (pos < src.size()) pos++;
+            return { TOK_STR, s, line };
         }
 
-        if (src.substr(pos, 2) == "==") { pos += 2; return { TOK_EQ, "==", line }; }
-        if (src.substr(pos, 2) == "!=") { pos += 2; return { TOK_NEQ, "!=", line }; }
-        if (src.substr(pos, 2) == "<=") { pos += 2; return { TOK_LE, "<=", line }; }
-        if (src.substr(pos, 2) == ">=") { pos += 2; return { TOK_GE, ">=", line }; } // В логах была опечатка
-        if (src.substr(pos, 2) == "++") { pos += 2; return { TOK_INC, "++", line }; }
-        if (src.substr(pos, 2) == "--") { pos += 2; return { TOK_DEC, "--", line }; }
-        if (src.substr(pos, 2) == "&&") { pos += 2; return { TOK_AND, "&&", line }; }
-        if (src.substr(pos, 2) == "||") { pos += 2; return { TOK_OR, "||", line }; }
+        auto safe_op = [&](std::string op) {
+            if (pos + op.size() <= src.size() && src.compare(pos, op.size(), op) == 0) {
+                pos += op.size(); return true;
+            }
+            return false;
+            };
+
+        if (safe_op("==")) return { TOK_EQ, "==", line };
+        if (safe_op("!=")) return { TOK_NEQ, "!=", line };
+        if (safe_op("<=")) return { TOK_LE, "<=", line };
+        if (safe_op(">=")) return { TOK_GE, ">=", line };
+        if (safe_op("++")) return { TOK_INC, "++", line };
+        if (safe_op("--")) return { TOK_DEC, "--", line };
+        if (safe_op("&&")) return { TOK_AND, "&&", line };
+        if (safe_op("||")) return { TOK_OR, "||", line };
 
         char c = src[pos++];
         switch (c) {
@@ -96,7 +121,8 @@ public:
         case '&': return { TOK_AMP, "&", line };    case '!': return { TOK_BANG, "!", line };
         case ',': return { TOK_COMMA, ",", line };
         }
-        return { TOK_EOF, "", line };
+        // ВАЖНО: Больше не возвращаем EOF на любой чих
+        return next();
     }
 };
 
@@ -331,38 +357,38 @@ public:
     std::string getAssembly() {
         std::stringstream ss;
         ss << "; TinyC v1.2 for CPU16\n.DATA\n" << data_ss.str();
-        ss << "\n.CODE\n.ORG 0x0000\n    MOV SP, 0xFFFE\n    MOV BP, 0xFFFE\n    CALL main\n    HLT\n";
+        ss << "\n.CODE\n.ORG 0x0000\n    MOV SP, 0x0100\n    MOV BP, 0x0100\n    CALL main\n    HLT\n";
         ss << code_ss.str(); return ss.str();
     }
 };
 
-//int main(int argc, char** argv) {
-//    if (argc < 2) {
-//        std::cerr << "Usage: " << argv[0] << " <source.c>" << std::endl;
-//        return 1;
-//    }
-//
-//    std::ifstream file("program.f");
-//    if (!file.is_open()) {
-//        std::cerr << "Could not open file: " << argv[1] << std::endl;
-//        return 1;
-//    }
-//
-//    std::string c_code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-//
-//    try {
-//        Compiler compiler(c_code);
-//        compiler.parseProgram();
-//        std::string asm_code = compiler.getAssembly();
-//
-//        std::ofstream out("output.asm");
-//        out << asm_code;
-//        out.close();
-//        std::cout << "Successfully compiled to output.asm" << std::endl;
-//    }
-//    catch (const std::exception& e) {
-//        std::cerr << "Compile Error: " << e.what() << std::endl;
-//        return 1;
-//    }
-//    return 0;
-//}
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <source.c>" << std::endl;
+        return 1;
+    }
+
+    std::ifstream file("vga_text.txt");
+    if (!file.is_open()) {
+        std::cerr << "Could not open file: " << argv[1] << std::endl;
+        return 1;
+    }
+
+    std::string c_code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    try {
+        Compiler compiler(c_code);
+        compiler.parseProgram();
+        std::string asm_code = compiler.getAssembly();
+
+        std::ofstream out("output.asm");
+        out << asm_code;
+        out.close();
+        std::cout << "Successfully compiled to output.asm" << std::endl;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Compile Error: " << e.what() << std::endl;
+        return 1;
+    }
+    return 0;
+}

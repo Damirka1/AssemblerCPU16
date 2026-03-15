@@ -21,8 +21,8 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{1af80f5c-dc5d-4142-9727-018e890a2cc9}</ProjectGuid>
-    <RootNamespace>AssemblerCPU16</RootNamespace>
+    <ProjectGuid>{9cf09366-cf7e-4152-8f6d-1f9f9739cf31}</ProjectGuid>
+    <RootNamespace>TinyC</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -104,8 +104,6 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -129,17 +127,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="test.asm" />
-    <None Include="test2.asm" />
-    <None Include="test3.asm" />
-    <None Include="test4.asm" />
-    <None Include="test5.asm" />
-  </ItemGroup>
-  <ItemGroup>
-    <Content Include="vga_text.txt" />
+    <ClCompile Include="tinyc.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

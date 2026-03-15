@@ -180,17 +180,34 @@ public:
             pl.raw_text = line_raw;
             pl.section = current_sec;
             pl.address = section_offsets[current_sec];
-            pl.is_imm = false;
-            pl.res_size = 0;
 
-            std::replace(line.begin(), line.end(), ',', ' ');
-            std::stringstream ss(line);
-            ss >> pl.opcode; pl.opcode = to_upper(pl.opcode);
+            // 1. Извлекаем Опкод
+            std::stringstream ss_cmd(line);
+            ss_cmd >> pl.opcode; pl.opcode = to_upper(pl.opcode);
 
+            // 2. Извлекаем аргументы (все что после опкода)
+            std::string args_line;
+            std::getline(ss_cmd, args_line);
+
+            // Чистим аргументы: убираем пробелы, чтобы было [BP+-6]
+            args_line.erase(std::remove_if(args_line.begin(), args_line.end(),
+                [](unsigned char c) { return std::isspace(c); }), args_line.end());
+
+            size_t comma_pos = args_line.find(',');
+            if (comma_pos != std::string::npos) {
+                pl.arg1 = to_upper(args_line.substr(0, comma_pos));
+                pl.arg2 = to_upper(args_line.substr(comma_pos + 1));
+            }
+            else {
+                pl.arg1 = to_upper(args_line);
+            }
+
+            // --- ОБРАБОТКА ДИРЕКТИВ (Твой оригинальный код) ---
             if (pl.opcode == ".WORD" || pl.opcode == "DW") {
                 pl.type = RAW_DATA;
+                std::stringstream ss_data(args_line);
                 std::string val_str;
-                while (ss >> val_str) {
+                while (std::getline(ss_data, val_str, ',')) {
                     if (constants.count(to_upper(val_str))) pl.raw_data.push_back(constants[to_upper(val_str)]);
                     else pl.raw_data.push_back(parse_number(val_str));
                 }
@@ -198,10 +215,9 @@ public:
             }
             else if (pl.opcode == ".STRING") {
                 pl.type = RAW_DATA;
-                std::string content; std::getline(ss, content);
-                size_t first_q = content.find('"'), last_q = content.rfind('"');
-                if (first_q != std::string::npos && last_q > first_q) {
-                    std::string text = content.substr(first_q + 1, last_q - first_q - 1);
+                size_t fq = line.find('"'), lq = line.rfind('"');
+                if (fq != std::string::npos && lq > fq) {
+                    std::string text = line.substr(fq + 1, lq - fq - 1);
                     for (char c : text) pl.raw_data.push_back((uint16_t)c);
                     pl.raw_data.push_back(0);
                 }
@@ -209,74 +225,59 @@ public:
             }
             else if (pl.opcode == ".RESW") {
                 pl.type = RES_DATA;
-                std::string val; ss >> val;
-                pl.res_size = parse_number(val);
+                pl.res_size = parse_number(pl.arg1);
                 section_offsets[current_sec] += pl.res_size;
             }
+            // --- ОБРАБОТКА ИНСТРУКЦИЙ (Исправленная логика IMM) ---
             else {
                 pl.type = INSTRUCTION;
-                if (ss >> pl.arg1) pl.arg1 = to_upper(pl.arg1);
-                if (ss >> pl.arg2) pl.arg2 = to_upper(pl.arg2);
+                // 1. Проверяем, есть ли смещение [R+OFF] или [R-OFF]
+                bool has_off = (args_line.find('+') != std::string::npos || args_line.find('-') != std::string::npos);
 
-                static const std::vector<std::string> imm_cmds = {
+                // 2. Команды, которые могут принимать либо РЕГИСТР (1 слово), либо АДРЕС/ЧИСЛО (2 слова)
+                static const std::vector<std::string> maybe_imm_cmds = {
                     "JMP", "JZ", "JNZ", "JC", "JNC", "JS", "JNS", "JO", "JNO", "JL", "JGE", "CALL", "PUSH"
                 };
+                bool is_maybe_imm_cmd = std::find(maybe_imm_cmds.begin(), maybe_imm_cmds.end(), pl.opcode) != maybe_imm_cmds.end();
 
-                bool arg1_br = (!pl.arg1.empty() && pl.arg1.front() == '[');
-                bool arg2_br = (!pl.arg2.empty() && pl.arg2.front() == '[');
-                bool has_off = (pl.arg1.find('+') != std::string::npos || pl.arg2.find('+') != std::string::npos);
-                bool is_imm_cmd = std::find(imm_cmds.begin(), imm_cmds.end(), pl.opcode) != imm_cmds.end();
-                bool arg2_imm = (!pl.arg2.empty() && !is_register(pl.arg2) && !arg2_br);
+                // Правило для может-быть-imm команд: если аргумент1 НЕ регистр - значит IMM
+                bool arg1_is_imm = is_maybe_imm_cmd && !pl.arg1.empty() && !is_register(pl.arg1);
 
-                if (has_off || arg2_imm || (is_imm_cmd && !pl.arg1.empty() && !is_register(pl.arg1) && !arg1_br)) {
+                // Правило для MOV/ADD/CMP: если аргумент2 НЕ регистр и НЕ [память] - значит IMM
+                bool arg2_is_imm = (!pl.arg2.empty() && !is_register(pl.arg2) && pl.arg2.front() != '[');
+
+                if (has_off || arg1_is_imm || arg2_is_imm) {
                     pl.is_imm = true;
-
                     std::string imm_str = "";
+
                     if (has_off) {
-                        std::string arg = (pl.arg1.find('+') != std::string::npos) ? pl.arg1 : pl.arg2;
-                        size_t plus = arg.find('+');
-                        imm_str = trim(arg.substr(plus + 1, arg.size() - plus - 2));
-                    }
-                    else if (is_imm_cmd) {
-                        imm_str = pl.arg1;
+                        std::string target = (pl.arg1.find('[') != std::string::npos) ? pl.arg1 : pl.arg2;
+                        size_t p = target.find_first_of("+-");
+                        imm_str = target.substr(p, target.size() - p - 1);
+                        if (imm_str.size() > 1 && imm_str[0] == '+' && imm_str[1] == '-') imm_str = imm_str.substr(1);
                     }
                     else {
-                        imm_str = pl.arg2;
+                        imm_str = (arg1_is_imm) ? pl.arg1 : pl.arg2;
                     }
 
-                    std::string upper_imm = to_upper(imm_str);
+                    if (!imm_str.empty()) {
+                        // Проверяем: это число (десятичное, hex или отрицательное) или метка/константа?
+                        bool is_num = isdigit(imm_str[0]) ||
+                            (imm_str.size() > 1 && imm_str[0] == '-' && isdigit(imm_str[1])) ||
+                            (imm_str.size() > 2 && to_upper(imm_str.substr(0, 2)) == "0X");
 
-                    if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && upper_imm.substr(0, 2) == "0X")) {
-                        pl.imm_value = parse_number(imm_str);
-                        pl.imm_label = ""; // Это число, имени нет
-                    }
-                    else {
-                        // Это имя (либо константа, либо метка)
-                        pl.imm_label = upper_imm;
-
-                        // Если это константа, мы уже знаем её значение
-                        if (constants.count(upper_imm)) {
-                            pl.imm_value = constants[upper_imm];
+                        if (is_num) {
+                            pl.imm_value = parse_number(imm_str);
+                            pl.imm_label = "";
+                        }
+                        else {
+                            pl.imm_label = to_upper(imm_str);
                         }
                     }
-
-                    //if (constants.count(to_upper(imm_str))) {
-                    //    pl.imm_value = constants[to_upper(imm_str)];
-                    //}
-                    //else if (isdigit(imm_str[0]) || imm_str[0] == '-' || (imm_str.size() > 1 && imm_str.substr(0, 2) == "0X")) {
-                    //    pl.imm_value = parse_number(imm_str);
-                    //    pl.imm_label = "";
-                    //}
-                    //else {
-                    //    pl.imm_label = to_upper(imm_str); // Теперь метка сохранится!
-                    //    if (constants.count(upper_imm)) {
-                    //        pl.imm_value = constants[upper_imm];
-                    //    }
-                    //}
-
                     section_offsets[current_sec] += 2;
                 }
                 else {
+                    pl.is_imm = false;
                     section_offsets[current_sec] += 1;
                 }
             }
@@ -318,23 +319,38 @@ public:
                 std::string o = pl.opcode;
 
                 auto parse_mem = [&](std::string arg, int& r, int& off) {
-                    if (arg.empty() || arg.front() != '[') return false;
-                    std::string c = arg.substr(1, arg.size() - 2);
-                    size_t p = c.find('+');
-                    if (p != std::string::npos) {
-                        r = REGISTERS[trim(c.substr(0, p))];
-                        off = parse_number(trim(c.substr(p + 1)));
-                        return true;
+                    if (arg.empty() || arg.front() != '[' || arg.back() != ']') return false;
+                    std::string content = arg.substr(1, arg.size() - 2); // BP+-6
+                    size_t p = content.find_first_of("+-");
+                    if (p == std::string::npos) return false;
+
+                    std::string reg_part = to_upper(trim(content.substr(0, p))); // "BP"
+                    std::string off_part = trim(content.substr(p));             // "+-6" или "-6"
+
+                    // Убираем лишний плюс перед минусом для stoi
+                    if (off_part.size() > 1 && off_part[0] == '+' && off_part[1] == '-') off_part = off_part.substr(1);
+
+                    if (REGISTERS.count(reg_part)) {
+                        r = REGISTERS[reg_part];
+                        try {
+                            off = std::stoi(off_part);
+                            return true;
+                        }
+                        catch (...) { return false; }
                     }
-                    r = REGISTERS[trim(c)]; off = 0; return false;
+                    return false;
                     };
 
                 int rb, ro;
                 if (o == "MOV" || o == "LDR" || o == "STR") {
                     if (parse_mem(pl.arg1, rb, ro)) { op = STR_OFF; ds = rb; src = REGISTERS[pl.arg2]; pl.imm_value = ro; }
                     else if (parse_mem(pl.arg2, rb, ro)) { op = LDR_OFF; ds = REGISTERS[pl.arg1]; src = rb; pl.imm_value = ro; }
-                    else if (pl.arg1.find('[') != std::string::npos) { op = STR; ds = REGISTERS[pl.arg1.substr(1, pl.arg1.size() - 2)]; src = REGISTERS[pl.arg2]; }
-                    else if (pl.arg2.find('[') != std::string::npos) { op = LDR; ds = REGISTERS[pl.arg1]; src = REGISTERS[pl.arg2.substr(1, pl.arg2.size() - 2)]; }
+                    else if (!pl.arg1.empty() && pl.arg1.front() == '[') {
+                        op = STR; ds = REGISTERS[trim(pl.arg1.substr(1, pl.arg1.size() - 2))]; src = REGISTERS[pl.arg2];
+                    }
+                    else if (!pl.arg2.empty() && pl.arg2.front() == '[') {
+                        op = LDR; ds = REGISTERS[pl.arg1]; src = REGISTERS[trim(pl.arg2.substr(1, pl.arg2.size() - 2))];
+                    }
                     else { op = MOV; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
                 }
                 else if (o == "ADD") { op = ADD; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
@@ -365,6 +381,8 @@ public:
                 else if (o == "INC") { op = INC; ds = REGISTERS[pl.arg1]; }
                 else if (o == "DEC") { op = DEC; ds = REGISTERS[pl.arg1]; }
                 else if (o == "HLT") { op = HLT; }
+                else if (o == "OUT") { op = OUT; ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
+                else if (o == "IN") { op = IN;  ds = REGISTERS[pl.arg1]; src = pl.is_imm ? 0 : REGISTERS[pl.arg2]; }
 
                 uint16_t word = (src << 12) | (ds << 8) | (op & 0xFF);
                 memory_map[abs_addr] = word;
